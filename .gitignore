@@ -1,0 +1,22 @@
+# Generated data — too large for git
+data/synthetic/
+data/raw/
+
+# Model weights
+*.bin
+*.safetensors
+*.pth
+*.pt
+*.gguf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Logs
+*.log
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
