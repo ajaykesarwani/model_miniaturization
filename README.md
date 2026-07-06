@@ -44,15 +44,31 @@ This project implements a compressed medical triage assistant using knowledge di
 ```
 model_miniaturization/
 ├── src/
+│   ├── approach2/                   # Datasets merging, NLI filtering, and fine-tuning pipelines
 │   ├── data_generation/
-│   │   └── teacher_inference.py     # Teacher inference + data generation pipeline
-│   ├── pruning/                     # Structured pruning (Week 3)
-│   ├── distillation/                # Knowledge distillation (Week 4)
-│   ├── finetuning/                  # LoRA fine-tuning (Week 5)
-│   └── evaluation/                  # Custom metrics and evaluation (Week 5)
+│   │   ├── teacher_inference.py     # Teacher inference + synthetic data generation pipeline
+│   │   └── prepare_dataset.py       # Stratified dataset split (80/10/10)
+│   ├── pruning/
+│   │   ├── importancescoring.py     # Taylor importance scoring for heads & layers
+│   │   ├── headpruning.py           # Attention head pruning (bottom 40%)
+│   │   └── layerdropping.py         # Layer dropping (drops 5 middle layers)
+│   ├── distillation/
+│   │   ├── kdtrainer.py             # Knowledge distillation trainer for Qwen3-0.6B student
+│   │   ├── kdtrainer_pruned.py      # Knowledge distillation trainer for pruned student base
+│   │   ├── featurekd.py             # Feature hidden state MSE loss
+│   │   └── cotdistillation.py       # Chain-of-Thought cross-entropy loss helper
+│   ├── finetuning/
+│   │   └── lorafinetune.py          # LoRA fine-tuning script
+│   └── evaluation/
+│       ├── evaluate_teacher_n.py    # Teacher model test evaluation (synthetic & real Latvia)
+│       ├── evaluate_distilled.py    # Generation-based evaluation for distilled students
+│       └── evaluate_distilled_logits.py # Logit-based evaluation for distilled students
 ├── data/
-│   └── synthetic/                   # Generated triage samples (gitignored)
-├── configs/                         # Training configs
+│   ├── approach2/                   # Merged datasets and fine-tuning adapters (gitignored)
+│   ├── distillation/                # Distillation model weights (gitignored)
+│   ├── pruning/                     # Pruned base model weights (gitignored)
+│   └── synthetic/                   # Generated synthetic datasets (gitignored)
+├── configs/                         # Training configuration files
 ├── notebooks/                       # Exploration and analysis notebooks
 └── report/                          # Final report (LaTeX)
 ```
@@ -76,39 +92,54 @@ CLINICAL REASONING:
 CONFIDENCE: HIGH
 ```
 
-**Target dataset:** 50,000 samples (15K EMERGENCY, 17.5K URGENT, 17.5K ROUTINE)
+**Target dataset:** 50,000 samples (15K EMERGENCY, 17.5K URGENT, 17.5K ROUTINE) generated under `data/synthetic/symptoms_50k.jsonl`.
 
 ---
 
-## Setup
+## Setup & Running the Pipeline
 
-**Container:** A6000 48 GB GPU, accessed via university VPN + SSH
-
+### Environment Activation
+All scripts should be executed using the custom Conda environment on the university container:
 ```bash
-# Activate environment
 source /opt/conda/etc/profile.d/conda.sh && conda activate /root/envs/miniaturization
-
-# Run teacher inference
 cd /root/model_miniaturization
-python src/data_generation/teacher_inference.py
 ```
 
-**Environment:**
-| Package | Version |
-|---|---|
-| torch | 2.6.0+cu124 |
-| transformers | 5.8.0 |
-| peft | 0.19.1 |
-| bitsandbytes | 0.49.2 |
-| accelerate | 1.13.0 |
+### 1. Pruning Pipeline (Week 3)
+Calculate Taylor importance scores, prune attention heads, and drop layers:
+```bash
+# Importance scoring
+python src/pruning/importancescoring.py
+# Prune bottom 40% attention heads
+python src/pruning/headpruning.py
+# Drop middle layers (drops middle 5 layers)
+python src/pruning/layerdropping.py
+```
+Output model weights are saved at `data/pruning/qwen3_pruned_heads_layers/`.
+
+### 2. Knowledge Distillation (Week 4)
+Run probability/logit-level KL-divergence distillation from the 8B teacher into the student models:
+```bash
+# Distill into baseline student
+python src/distillation/kdtrainer.py --epochs 1 --batch_size 2
+# Distill into pruned student base
+python src/distillation/kdtrainer_pruned.py --epochs 1 --batch_size 2
+```
+
+### 3. LoRA Fine-Tuning (Week 5)
+Fine-tune the student model (distilled or base) on the combined dataset (synthetic + real-patient datasets):
+```bash
+python src/finetuning/lorafinetune.py --epochs 3 --batch_size 4 --grad_accum 8
+```
 
 ---
 
-## Target Metrics
+## Evaluation results & Target Metrics
 
-| Metric | Target |
-|---|---|
-| Triage accuracy | > 85% |
-| Emergency recall | > 95% |
-| Macro F1 | > 0.83 |
-| Student VRAM | < 1 GB (4-bit quantized) |
+| Metric | Target | Fine-tuned Student (Qwen3-0.6B+LoRA) | Pruned Student (Qwen3-Pruned+LoRA) | Distilled Student (Qwen3-KD-0.6B) |
+|---|---|---|---|---|
+| **Triage Accuracy** | > 85% | **90.8%** | **90.5%** | **35.3%** (34.7% on real) |
+| **Emergency Recall** | > 95% | **82.7%** (100% w/ logit sweep) | **91.7%** (100% w/ logit sweep) | **100.0%** (98.6% on real) |
+| **Macro F1** | > 0.83 | **0.909** | **0.602** (MIMIC) | **0.285** |
+| **Student VRAM** | < 1 GB | **0.54 GB** | **0.54 GB** | **0.54 GB** |
+

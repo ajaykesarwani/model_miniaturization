@@ -5,27 +5,21 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
+import argparse
+
 DATA_DIR = Path("/root/model_miniaturization/data")
-TRAIN_PATH = DATA_DIR / "approach2/combined_train_v4.jsonl"  # same as v4
+TRAIN_PATH = DATA_DIR / "approach2/combined_train_v4.jsonl"
 OUT_DIR = DATA_DIR / "distillation/qwen3_pruned_kd_student"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TEACHER_ID = "aaditya/OpenBioLLM-Llama3-8B"
-# Use the pruned backbone as the student base
 STUDENT_BASE = str(DATA_DIR / "pruning/qwen3_pruned_heads_layers")
-
-T = 4.0
-ALPHA = 0.7
-BATCH_SIZE = 2    # small for 8B teacher
-LR = 1e-4
-EPOCHS = 1
 
 LABELS = ["EMERGENCY", "URGENT", "ROUTINE"]
 LABEL_TO_ID = {l: i for i, l in enumerate(LABELS)}
 
 
 class TriageDataset(Dataset):
-    def __init__(self, path):
+    def __init__(self, path, limit=None):
         self.rows = []
         with open(path, "r") as f:
             for line in f:
@@ -34,6 +28,9 @@ class TriageDataset(Dataset):
                 txt = r.get("symptom_description") or r.get("input")
                 if txt and label in LABEL_TO_ID:
                     self.rows.append((txt, LABEL_TO_ID[label]))
+        if limit:
+            self.rows = self.rows[:limit]
+
 
     def __len__(self):
         return len(self.rows)
@@ -60,15 +57,28 @@ def build_prompt(description: str, system_prompt: str):
     )
 
 
-def kd_loss(teacher_logits, student_logits):
-    t_probs = F.softmax(teacher_logits / T, dim=-1)
-    s_log_probs = F.log_softmax(student_logits / T, dim=-1)
-    return F.kl_div(s_log_probs, t_probs, reduction="batchmean") * (T * T)
+def kd_loss(teacher_logits, student_logits, temperature):
+    t_probs = F.softmax(teacher_logits / temperature, dim=-1)
+    s_log_probs = F.log_softmax(student_logits / temperature, dim=-1)
+    return F.kl_div(s_log_probs, t_probs, reduction="batchmean") * (temperature * temperature)
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--alpha", type=float, default=0.7)
+    parser.add_argument("--temperature", type=float, default=4.0)
+    parser.add_argument("--limit", type=int, default=None)
+    args = parser.parse_args()
+
+    # Create output dir
+    Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+    print(f"Distillation parameters: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}, alpha={args.alpha}, temp={args.temperature}, limit={args.limit}")
 
     # Teacher in 4-bit NF4
     print(f"Loading teacher {TEACHER_ID} in 4-bit NF4...")
@@ -100,13 +110,13 @@ def main():
         trust_remote_code=True,
     )
     student_model.train()
-    optimizer = torch.optim.AdamW(student_model.parameters(), lr=LR)
+    optimizer = torch.optim.AdamW(student_model.parameters(), lr=args.lr)
 
-    ds = TriageDataset(TRAIN_PATH)
-    dl = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True)
+    ds = TriageDataset(TRAIN_PATH, limit=args.limit)
+    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True)
     print(f"Dataset size: {len(ds)}")
 
-    for epoch in range(EPOCHS):
+    for epoch in range(args.epochs):
         total_loss = 0.0
         for step, (texts, labels) in enumerate(dl, start=1):
             teacher_prompts = [build_prompt(t, SYSTEM_PROMPT) for t in texts]
@@ -151,9 +161,9 @@ def main():
 
             labels_tensor = torch.tensor(labels, device=device, dtype=torch.long)
 
-            loss_kd = kd_loss(teacher_label_logits, student_label_logits)
+            loss_kd = kd_loss(teacher_label_logits, student_label_logits, args.temperature)
             loss_ce = F.cross_entropy(student_label_logits, labels_tensor)
-            loss = ALPHA * loss_kd + (1.0 - ALPHA) * loss_ce
+            loss = args.alpha * loss_kd + (1.0 - args.alpha) * loss_ce
 
             optimizer.zero_grad()
             loss.backward()
@@ -169,6 +179,7 @@ def main():
     student_model.save_pretrained(OUT_DIR)
     student_tokenizer.save_pretrained(OUT_DIR)
     print("Done.")
+
 
 
 if __name__ == "__main__":

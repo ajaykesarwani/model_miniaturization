@@ -39,6 +39,7 @@ def main():
         BASE_MODEL,
         device_map="auto",
         trust_remote_code=True,
+        attn_implementation="eager",
     )
     model.eval()
 
