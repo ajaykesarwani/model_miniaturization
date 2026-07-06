@@ -1,6 +1,5 @@
 # Generated data — too large for git
-data/synthetic/
-data/raw/
+data/
 
 # Model weights
 *.bin
