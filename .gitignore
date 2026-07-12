@@ -24,3 +24,4 @@ __pycache__/
 PROGRESS.md
 docs/
 src/data_generation/debug_output.py
+.gradio/

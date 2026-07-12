@@ -89,6 +89,10 @@ def main():
         bnb_4bit_use_double_quant=True,
     )
     teacher_tokenizer = AutoTokenizer.from_pretrained(TEACHER_ID)
+    if teacher_tokenizer.pad_token is None:
+        teacher_tokenizer.pad_token = teacher_tokenizer.eos_token
+    teacher_tokenizer.padding_side = "left"
+    
     teacher_model = AutoModelForCausalLM.from_pretrained(
         TEACHER_ID,
         quantization_config=bnb_teacher,
@@ -138,7 +142,7 @@ def main():
             teacher_label_logits = []
             for lbl in LABELS:
                 toks = teacher_tokenizer(lbl, add_special_tokens=False)["input_ids"]
-                teacher_label_logits.append(t_logits_vocab[:, toks].mean(dim=-1))
+                teacher_label_logits.append(t_logits_vocab[:, toks[0]])
             teacher_label_logits = torch.stack(teacher_label_logits, dim=1)
 
             # Student forward
@@ -156,10 +160,10 @@ def main():
             student_label_logits = []
             for lbl in LABELS:
                 toks = student_tokenizer(lbl, add_special_tokens=False)["input_ids"]
-                student_label_logits.append(s_logits_vocab[:, toks].mean(dim=-1))
+                student_label_logits.append(s_logits_vocab[:, toks[0]])
             student_label_logits = torch.stack(student_label_logits, dim=1)
 
-            labels_tensor = torch.tensor(labels, device=device, dtype=torch.long)
+            labels_tensor = labels.to(device, dtype=torch.long)
 
             loss_kd = kd_loss(teacher_label_logits, student_label_logits, args.temperature)
             loss_ce = F.cross_entropy(student_label_logits, labels_tensor)

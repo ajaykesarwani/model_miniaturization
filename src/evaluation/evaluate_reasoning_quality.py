@@ -40,14 +40,14 @@ def load_synthetic_reasoning(path: Path, n_per_class: int = 200, seed: int = 42)
 
 
 def load_pubmedqa_references(n: int = 300, seed: int = 42):
-    """Load PubMedQA long answers as real clinical reference reasoning."""
-    print("Loading PubMedQA references...")
-    ds = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split="train")
+    """Load PubMedQA long answers as real clinical reference reasoning from local raw data."""
+    print("Loading PubMedQA references from local pubmedqa_references.json...")
+    local_path = Path("/root/model_miniaturization/data/raw/pubmedqa_references.json")
+    with open(local_path, "r") as f:
+        ds = json.load(f)
     rng = random.Random(seed)
     refs = []
-    for item in ds:
-        # long_answer is the clinical reasoning paragraph
-        text = item.get("long_answer", "")
+    for text in ds:
         if isinstance(text, str) and len(text) > 100:
             refs.append(text[:800])  # cap at 800 chars — similar length to our reasoning
     rng.shuffle(refs)

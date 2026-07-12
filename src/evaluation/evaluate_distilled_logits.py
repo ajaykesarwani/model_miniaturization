@@ -20,6 +20,26 @@ import torch.nn.functional as F
 from pathlib import Path
 from collections import Counter, defaultdict
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from datasets import load_dataset
+
+LABEL_MAP = {
+    "immediate": "EMERGENCY",
+    "urgent":    "URGENT",
+    "routine":   "ROUTINE",
+}
+
+def build_syntech_description(sample: dict) -> str:
+    p    = sample["patient"]
+    pres = sample["presentation"]
+    risk = sample["risk_assessment"]
+    symptoms = ", ".join(pres["symptoms"])
+    flags    = ", ".join(risk["red_flags"]) if risk["red_flags"] else "none"
+    return (
+        f"A {p['age']}-year-old {p['gender']} presenting with {symptoms}. "
+        f"Duration: {pres['duration']}. Onset: {pres['onset']}. "
+        f"Context: {pres['context']}. Red flags: {flags}."
+    )
+
 
 SYSTEM_PROMPT = """You are a senior emergency physician. Given a patient description, classify the triage level.
 
@@ -111,11 +131,18 @@ def main():
         print(f"  Label {lbl} tokens: {toks} -> {[tokenizer.decode([t]) for t in toks]}")
 
     print(f"\nLoading test set...")
-    test_samples = []
-    with open(args.test_path, "r") as f:
-        for line in f:
-            test_samples.append(json.loads(line))
-    label_dist = Counter(s["triage_level"] for s in test_samples)
+    is_syntech = (args.test_path == "syntech-500")
+    if is_syntech:
+        print("Loading syntech-ai/medical-triage-500 from HuggingFace...")
+        test_samples_ds = load_dataset("syntech-ai/medical-triage-500", data_files="medical_triage_500.jsonl", split="train")
+        test_samples = [test_samples_ds[j] for j in range(len(test_samples_ds))]
+        label_dist = Counter(LABEL_MAP[s["triage_classification"]["urgency_category"]] for s in test_samples)
+    else:
+        test_samples = []
+        with open(args.test_path, "r") as f:
+            for line in f:
+                test_samples.append(json.loads(line))
+        label_dist = Counter(s["triage_level"] for s in test_samples)
     print(f"  {len(test_samples)} samples | {dict(label_dist)}")
 
     print(f"\nRunning logit extraction...")
@@ -123,7 +150,13 @@ def main():
     
     for i in range(0, len(test_samples), args.batch_size):
         batch = test_samples[i : i + args.batch_size]
-        prompts = [build_prompt(s.get("symptom_description") or s.get("input", "")) for s in batch]
+        prompts = []
+        for s in batch:
+            if is_syntech:
+                desc = build_syntech_description(s)
+            else:
+                desc = s.get("symptom_description") or s.get("input") or ""
+            prompts.append(build_prompt(desc))
         
         enc = tokenizer(
             prompts,
@@ -150,8 +183,13 @@ def main():
             probs = F.softmax(torch.tensor(class_logits), dim=-1).tolist()
             pred_class = LABELS[np.argmax(probs)]
             
+            if is_syntech:
+                true_label = LABEL_MAP[s["triage_classification"]["urgency_category"]]
+            else:
+                true_label = s["triage_level"]
+                
             data.append({
-                "true": s["triage_level"],
+                "true": true_label,
                 "base_pred": pred_class,
                 "p_em": probs[0],
                 "p_ur": probs[1],

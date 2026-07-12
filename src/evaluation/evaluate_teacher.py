@@ -161,8 +161,8 @@ def main():
         # true_label = LABEL_MAP[sample["triage_classification"]["urgency_category"]]
         # description = build_description(sample)
         if args.test_path:
-            true_label = sample["triage_level"]
-            description = sample["input"]
+            true_label = sample.get("triage_level")
+            description = sample.get("symptom_description") or sample.get("input") or ""
         else:
             true_label = LABEL_MAP[sample["triage_classification"]["urgency_category"]]
             description = build_description(sample)
@@ -203,7 +203,7 @@ def main():
     print_metrics(metrics, len(ds), failed)
 
     # Save metrics summary
-    summary_path = Path(args.output).parent / "teacher_eval_summary.json"
+    summary_path = Path(args.output).parent / (Path(args.output).stem + "_summary.json")
     with open(summary_path, "w") as f:
         json.dump({"model": MODEL_ID, "n_samples": len(ds), "n_failed": failed, **metrics}, f, indent=2)
     print(f"Summary saved to {summary_path}")
