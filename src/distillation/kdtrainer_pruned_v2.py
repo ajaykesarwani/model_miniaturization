@@ -19,13 +19,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import get_peft_model, LoraConfig, TaskType
 
 DATA_DIR   = Path("/root/model_miniaturization/data")
 TRAIN_PATH = DATA_DIR / "approach2/combined_train_v4.jsonl"
-OUT_DIR    = DATA_DIR / "distillation/qwen3_kd_lora_v2"
+OUT_DIR    = DATA_DIR / "distillation/qwen3_pruned_kd_lora_v2"
 
 TEACHER_ID   = "aaditya/OpenBioLLM-Llama3-8B"
-STUDENT_BASE = "Qwen/Qwen3-0.6B"
+STUDENT_BASE = str(DATA_DIR / "pruning/qwen3_pruned_heads_layers")
 
 LABELS      = ["EMERGENCY", "URGENT", "ROUTINE"]
 LABEL_TO_ID = {l: i for i, l in enumerate(LABELS)}
@@ -101,7 +102,7 @@ def bnb_config():
     return BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.bfloat16,
         bnb_4bit_use_double_quant=True,
     )
 
@@ -153,9 +154,18 @@ def main():
     if s_tok.pad_token is None:
         s_tok.pad_token = s_tok.eos_token
     s_tok.padding_side = "left"
-    s_model = AutoModelForCausalLM.from_pretrained(
-        STUDENT_BASE, device_map="auto", trust_remote_code=True
+    s_model_base = AutoModelForCausalLM.from_pretrained(
+        STUDENT_BASE, quantization_config=bnb_config(), device_map="auto", trust_remote_code=True
     )
+    
+    lora_config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM,
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    )
+    s_model = get_peft_model(s_model_base, lora_config)
     s_model.train()
     optimizer = torch.optim.AdamW(s_model.parameters(), lr=args.lr)
 
@@ -179,20 +189,26 @@ def main():
                           truncation=True, max_length=256).to(device)
             with torch.inference_mode():
                 t_out = t_model(**t_inp)
-                t_label_logits = get_label_logits(t_out.logits[:, -1, :], t_tok, LABELS)
+                teacher_label_logits = get_label_logits(t_out.logits[:, -1, :], t_tok, LABELS).float()
 
             # ── Student forward ───────────────────────────────────────────────
             s_prompts = [build_prompt(t) for t in texts]
             s_inp = s_tok(s_prompts, return_tensors="pt", padding=True,
                           truncation=True, max_length=256).to(device)
             s_out = s_model(**s_inp)
-            s_label_logits = get_label_logits(s_out.logits[:, -1, :], s_tok, LABELS)
+            s_logits_vocab = s_out.logits[:, -1, :]
+
+            student_label_logits = []
+            for lbl in LABELS:
+                toks = s_tok(lbl, add_special_tokens=False)["input_ids"]
+                student_label_logits.append(s_logits_vocab[:, toks[0]])
+            student_label_logits = torch.stack(student_label_logits, dim=1).float()
 
             label_ids_t = label_ids.to(device, dtype=torch.long)
 
             # ── Losses ────────────────────────────────────────────────────────
-            loss_kd = kd_loss(t_label_logits, s_label_logits, args.temperature)
-            loss_ce = F.cross_entropy(s_label_logits.float(), label_ids_t, weight=class_weights)
+            loss_kd = kd_loss(teacher_label_logits, student_label_logits, args.temperature)
+            loss_ce = F.cross_entropy(student_label_logits, label_ids_t, weight=class_weights)
             loss    = args.alpha * loss_kd + (1 - args.alpha) * loss_ce
 
             # Optional: sequence-level CE on response text (prevents vocab collapse)
@@ -221,6 +237,7 @@ def main():
 
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(s_model.parameters(), max_norm=1.0)
             optimizer.step()
 
             total_loss += loss.item()

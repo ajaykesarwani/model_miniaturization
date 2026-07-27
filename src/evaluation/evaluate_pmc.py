@@ -116,7 +116,7 @@ def run_teacher(samples: list) -> list:
         with torch.inference_mode():
             out = model.generate(
                 **inputs,
-                max_new_tokens=10,
+                max_new_tokens=20,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
@@ -145,14 +145,22 @@ def run_teacher(samples: list) -> list:
 # ── Phase 2: Student ──────────────────────────────────────────────────────────
 
 def run_student(results: list) -> list:
-    print(f"\n=== PHASE 2: Student ({STUDENT_ID} + v4 LoRA) ===")
+    print(f"\n=== PHASE 2: Student ({STUDENT_ID}) ===")
+    
+    # If a specific base is provided via STUDENT_ID
     tokenizer = AutoTokenizer.from_pretrained(STUDENT_ID)
+    base_id = STUDENT_ID
+    
     base = AutoModelForCausalLM.from_pretrained(
-        STUDENT_ID,
+        base_id,
         quantization_config=bnb_config(),
         device_map="auto",
     )
-    model = PeftModel.from_pretrained(base, ADAPTER_PATH)
+    if "kd" not in ADAPTER_PATH:
+        model = PeftModel.from_pretrained(base, ADAPTER_PATH)
+    else:
+        model = base
+        
     model.eval()
     print(f"Student loaded — VRAM: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
@@ -163,7 +171,7 @@ def run_student(results: list) -> list:
         with torch.inference_mode():
             out = model.generate(
                 **inputs,
-                max_new_tokens=10,
+                max_new_tokens=20,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
@@ -233,12 +241,18 @@ def print_metrics(m: dict):
 
 
 def main():
+    global ADAPTER_PATH, STUDENT_ID
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n",       type=int, default=N_SAMPLES, help="Number of PMC samples")
-    parser.add_argument("--output",  default=str(OUTPUT_DIR))
-    parser.add_argument("--skip-teacher", action="store_true",
+    parser.add_argument("--n", type=int, default=200, help="Number of PMC cases to evaluate")
+    parser.add_argument("--output", default="/root/model_miniaturization/data/evaluation/pmc")
+    parser.add_argument("--skip_teacher", action="store_true",
                         help="Re-use saved teacher predictions (pmc_teacher.jsonl must exist)")
+    parser.add_argument("--adapter", default=ADAPTER_PATH, help="Path to student adapter")
+    parser.add_argument("--base", default=STUDENT_ID, help="Path to student base model")
     args = parser.parse_args()
+
+    ADAPTER_PATH = args.adapter
+    STUDENT_ID = args.base
 
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)

@@ -18,11 +18,9 @@ SYSTEM_PROMPT = (
 
 def build_prompt(description: str) -> str:
     return (
-        f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n"
-        f"{SYSTEM_PROMPT}<|eot_id|>"
-        f"<|start_header_id|>user<|end_header_id|>\n"
-        f"Patient: {description}<|eot_id|>"
-        f"<|start_header_id|>assistant<|end_header_id|>\n"
+        f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n"
+        f"<|im_start|>user\nPatient: {description}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
     )
 
 def extract_label(text: str):

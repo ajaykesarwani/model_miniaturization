@@ -25,6 +25,7 @@ from transformers import (
     Trainer,
     DataCollatorForSeq2Seq,
     BitsAndBytesConfig,
+    EarlyStoppingCallback,
 )
 from peft import LoraConfig, get_peft_model, TaskType
 
@@ -192,6 +193,7 @@ def main():
         eval_dataset=val_ds,
         processing_class=tokenizer,
         data_collator=data_collator,
+        callbacks=[EarlyStoppingCallback(early_stopping_patience=1)],
     )
 
     print(f"\nFine-tuning {MODEL_ID} with LoRA...")

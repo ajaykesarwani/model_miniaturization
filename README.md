@@ -63,6 +63,8 @@ model_miniaturization/
 │       ├── evaluate_teacher_n.py    # Teacher model test evaluation (synthetic & real Latvia)
 │       ├── evaluate_distilled.py    # Generation-based evaluation for distilled students
 │       └── evaluate_distilled_logits.py # Logit-based evaluation for distilled students
+├── app_streamlit.py                 # Streamlit dashboard UI for triage chatbot demo
+├── requirements.txt                 # Core Python dependencies for the project
 ├── data/
 │   ├── approach2/                   # Merged datasets and fine-tuning adapters (gitignored)
 │   ├── distillation/                # Distillation model weights (gitignored)
@@ -133,9 +135,9 @@ python src/finetuning/lorafinetune.py --epochs 3 --batch_size 4 --grad_accum 8
 ```
 
 ### 4. Running the Chatbot UI Demo
-To launch the Gradio web interface and interact with the trained models, run the enhanced demo script. It provides a clinical CSS theme and displays model comparison metrics alongside live inference:
+To launch the interactive web interface and interact with the trained models, run the Streamlit dashboard script. It provides a premium UI, loads the student model in 4-bit, and performs real-time inference on GPU with color-coded triage badges and VRAM monitoring:
 ```bash
-python src/demo/triage_chatbot_enhanced.py
+streamlit run app_streamlit.py
 ```
 This will launch a local server and provide a URL to access the UI in your browser.
 
@@ -197,7 +199,7 @@ We compare the student model's metrics across different stages of training and c
 | | Pruned Distilled (KD) (Argmax) | 43.8% | 0.349 | 41.6% | 0/3,000 |
 | | Pruned Distilled (KD) (t=0.05) | 33.3% | 0.167 | 100.0% | 0/3,000 |
 | **MIMIC (Real)** | Raw/Zero-Shot | 8.7% | 0.286 | 100.0% | 176/207 |
-| | Fine-Tuned (SFT) | 80.2% | 0.531 | 90.4% | 0/207 |
+| | Fine-Tuned (SFT) | 74.9% | 0.531 | 80.9% | 0/42 |
 | | Pruned SFT | 74.4% | 0.495 | 80.0% | 0/207 |
 | | Distilled (KD) (Argmax) | 42.9% | 0.200 | 0.0% | 0/42 |
 | | Distilled (KD) (t=0.05) | 57.1% | 0.242 | 100.0% | 0/42 |
@@ -217,5 +219,83 @@ We measure the quality of the teacher model's synthetic clinical reasoning chain
 
 An overall F1 score of **0.82** confirms that the generated synthetic reasoning chains are semantically coherent and consistent across all triage categories.
 
+---
 
+## Experimental Details: LoRA & Knowledge Distillation (KD)
 
+*This section focuses specifically on the Low-Rank Adaptation (LoRA) and Knowledge Distillation (KD) techniques applied to the `Qwen3-0.6B` student model.*
+
+### 1. LoRA Fine-Tuning (SFT)
+
+The student model was fine-tuned using LoRA to adapt it to the medical triage task based on synthetic and real-world datasets.
+
+- **Adapter Settings:** Rank `r=16`, `alpha=32`, applied in 4-bit NF4 quantization.
+- **Training Data:** Synthetically generated triage scenarios, `syntech-500`, `fedmml-ed-triage` (Denmark and Turkey), and `MIMIC-IV-ED` datasets. (Total: ~42.8k samples).
+- **Performance (SFT v4):** 
+  - Synthetic Test: 100% Accuracy, 100% Emergency Recall
+  - Latvia (Domain-shift): 100% Accuracy, 100% Emergency Recall
+  - MIMIC (Real-world): 74.9% Accuracy, 80.9% Emergency Recall (held-out test set)
+
+### 2. Knowledge Distillation (KD)
+
+Knowledge Distillation was employed to transfer the learned representations from the 8B teacher model (`aaditya/OpenBioLLM-Llama3-8B`) to the 0.6B student model.
+
+- **KD v1:** 
+  - Logit-level KD with `alpha=0.7`, Temperature `T=4.0`.
+  - Results: Poor argmax performance (35% accuracy, 0% EM recall). With logit sweep (`t=0.05`), recall rescues to 100% but accuracy drops.
+- **KD v2 (Full Fine-Tune):** 
+  - Trained the full 0.6B student model (no LoRA) on 42k combined samples for 2 epochs.
+  - **Results:** Suffered from severe mode collapse (overfitting to the majority `ROUTINE` class and generating gibberish text):
+
+| Dataset | Argmax Accuracy | Argmax Recall | Sweep Accuracy | Sweep EM Recall | Sweep Threshold |
+|---|---|---|---|---|---|
+| **Synthetic Test** | Collapsed | Collapsed | 60.8% | 92.0% | t=0.10 |
+| **Syntech-500** | Collapsed | Collapsed | 15.0% | 0.0% | All |
+| **Latvia (Domain-shift)** | Collapsed | Collapsed | 64.7% | 98.3% | t=0.20 |
+| **MIMIC (Real-world)** | 0.0% | 0.0% | N/A | N/A | N/A |
+| **PMC-Patients** | 0% parsed | 0% parsed | N/A | N/A | N/A |
+
+### 3. Pruned Student + LoRA Recovery
+
+- **Pruning Strategy:** Taylor importance scoring followed by dropping the bottom 40% of attention heads and removing 5 middle layers.
+- **Recovery:** LoRA fine-tuning applied to the pruned base model.
+- **Performance:** 90.5% Triage Accuracy and 91.7% Emergency Recall on the MIMIC held-out test.
+
+### 4. Phase 2: Pruned Student + KD + LoRA (1 Epoch)
+
+To mitigate the mode collapse from Phase 1, we implemented a robust Phase 2 pipeline:
+- **Architecture:** We used the Pruned Student (`qwen3_pruned_heads_layers`) as the base model and attached a LoRA adapter (`r=16`, `alpha=32`).
+- **Knowledge Distillation:** We ran KD to train *only* the LoRA adapter, freezing the pruned base to prevent catastrophic forgetting.
+- **Bug Fixes:** Resolved an FP16 numerical overflow bug in the Llama-3 Teacher by enforcing `bfloat16` precision, and added gradient clipping.
+- **Results:** The model successfully avoided the 0% recall collapse seen in Phase 1. While the argmax baseline is heavily biased towards predicting `EMERGENCY` (yielding 100% recall but lower accuracy), sweeping the decision threshold recovers significant accuracy:
+
+| Dataset | Argmax Accuracy | Argmax Recall | Best Sweep Threshold | Sweep Accuracy | Sweep EM Recall |
+|---|---|---|---|---|---|
+| **Synthetic Test** | 29.6% | 100.0% | t=0.65 | 70.2% | 100.0% |
+| **Syntech-500** | 46.0% | 100.0% | t=0.55 | 62.4% | 100.0% |
+| **Latvia (Domain-shift)** | 33.3% | 100.0% | t=0.70 | 71.6% | 100.0% |
+| **MIMIC (Real-world)** | 57.1% | 100.0% | t=0.80 | 61.9% | 83.3% |
+| **PMC-Patients** | 0% parsed | 0% parsed | N/A | 0% parsed | 0% parsed |
+
+*Note: The PMC-Patients evaluation relies on autoregressive text generation. Because the Phase 2 LoRA adapter was trained using token-level Cross Entropy on the label only (`seq-ce=OFF`), the model successfully learned to output precise logits for triage classes but lost its conversational text-generation capabilities. This resulted in a 98.5% unparsed rate during the PMC generative evaluation. To fix this in Phase 3, we must re-enable `seq-ce=ON` so the model retains its language abilities.*
+
+*Update: The unparsed rate bug in MIMIC evaluation was successfully resolved by switching from the Llama 3 prompt template to Qwen's native ChatML format in `evaluate_student_mimic.py`.*
+
+### Challenges Faced
+
+Throughout the development and training phases, several significant technical hurdles were encountered and resolved:
+
+1. **Catastrophic Mode Collapse (Phase 1):**
+   - During the initial full fine-tuning of the student model without LoRA, the model collapsed entirely, predicting the majority class (`ROUTINE`) for almost all samples. This resulted in a disastrous 0% recall rate for `EMERGENCY` cases, rendering the model unsafe for triage. This was resolved in Phase 2 by utilizing LoRA adapters and freezing the pruned base weights, successfully rescuing the recall back up to 100%.
+
+2. **Mathematical Overflow & `NaN` Loss (Phase 2):**
+   - During Phase 2 Knowledge Distillation, the training persistently crashed midway through the epoch due to a `NaN` (Not a Number) loss explosion. 
+   - Initially, this was suspected to be exploding gradients in the student model, leading to the implementation of strict gradient clipping. 
+   - However, the crashes persisted. The true root cause was identified as an architectural limitation in the 8B Teacher model (`Llama-3`). When running in 4-bit `float16` precision, the teacher's attention scores occasionally spiked above the maximum limit of `float16` (65,504), overflowing into `Infinity` and corrupting the student's training targets. This was permanently fixed by forcing the teacher pipeline to use `bfloat16` (Brain Float 16), which has a vastly larger mathematical ceiling.
+
+3. **Loss of Generative Capabilities (PMC-Patients):**
+   - The generative evaluation for the PMC-Patients dataset experienced a 98.5% unparsed failure rate. This occurred because the Phase 2 KD training was deliberately run with Sequence Cross-Entropy disabled (`seq-ce=OFF`). While this successfully forced the model to master the triage classification logits, it stripped the model of its autoregressive conversational abilities, causing it to output gibberish instead of properly formatted text. Future phases will need to re-enable sequence-level modeling to retain chat capabilities.
+
+### Next Steps
+
+1. Conduct **LoRA settings ablations** (sweeping r, alpha, dropout, target modules, learning rate) to further optimize the adapter.

@@ -178,8 +178,25 @@ def main():
     label_ids = get_label_token_ids(tokenizer)
 
     print(f"\nLoading test set: {args.test}")
-    with open(args.test) as f:
-        samples = [json.loads(l) for l in f]
+    if args.test == "syntech-500":
+        from datasets import load_dataset
+        ds = load_dataset("syntech-ai/medical-triage-500", data_files="medical_triage_500.jsonl", split="train")
+        samples = []
+        for s in ds:
+            p = s["patient"]
+            pres = s["presentation"]
+            risk = s["risk_assessment"]
+            symptoms = ", ".join(pres["symptoms"])
+            flags = ", ".join(risk["red_flags"]) if risk["red_flags"] else "none"
+            desc = (f"A {p['age']}-year-old {p['gender']} presenting with {symptoms}. "
+                    f"Duration: {pres['duration']}. Onset: {pres['onset']}. "
+                    f"Context: {pres['context']}. Red flags: {flags}.")
+            SYNTECH_MAP = {"immediate": "EMERGENCY", "urgent": "URGENT", "routine": "ROUTINE"}
+            true_label = SYNTECH_MAP[s["triage_classification"]["urgency_category"]]
+            samples.append({"input": desc, "triage_level": true_label})
+    else:
+        with open(args.test) as f:
+            samples = [json.loads(l) for l in f]
     print(f"  {len(samples)} samples")
 
     print(f"\nRunning forward passes...")
